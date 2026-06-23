@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 import pty
+import shlex
 import select
 import atexit
 from pathlib import Path
@@ -19,11 +20,38 @@ except ImportError:
     print("  python3 -m playwright install chromium")
     sys.exit(1)
 
-XFREERDP = Path.home() / "freerdp-webview/build/client/X11/xfreerdp"
-RDPW = Path.home() / "Desktop/East NVDesktop-10.rdpw"
-BROWSER_PROFILE = Path.home() / ".cache/avd-token-browser"
+CONFIG_FILE = Path.home() / ".config/xfreerdp-flankspeed/config.env"
 
-USER = "johnathon.s.mccollum.civ@us.navy.mil"
+def expand_path(value: str) -> Path:
+    value = value.replace("$HOME", str(Path.home()))
+    value = os.path.expandvars(value)
+    value = os.path.expanduser(value)
+    return Path(value)
+
+def load_config():
+    cfg = {}
+
+    if CONFIG_FILE.exists():
+        for raw in CONFIG_FILE.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            cfg[key.strip()] = shlex.split(value.strip())[0] if value.strip() else ""
+
+    cfg.setdefault("XFREERDP_PATH", "$HOME/freerdp-webview/build/client/X11/xfreerdp")
+    cfg.setdefault("RDPW_PATH", "$HOME/Desktop/East NVDesktop-10.rdpw")
+    cfg.setdefault("BROWSER_PROFILE", "$HOME/.cache/avd-token-browser")
+    cfg.setdefault("USER_UPN", "")
+
+    return cfg
+
+CFG = load_config()
+
+XFREERDP = expand_path(CFG["XFREERDP_PATH"])
+RDPW = expand_path(CFG["RDPW_PATH"])
+BROWSER_PROFILE = expand_path(CFG["BROWSER_PROFILE"])
+USER = CFG["USER_UPN"]
 
 WEBCLIENT_URL = "https://client.wvd.azure.us/arm/webclient/index.html"
 FEEDDISCOVERY_MATCH = "https://client.wvd.azure.us/api/arm/feeddiscovery"
@@ -41,6 +69,8 @@ def die(msg, code=1):
 
 
 def check_paths():
+    if not USER:
+        die(f"USER_UPN is not set. Create {CONFIG_FILE} from examples/config.example.env")
     if not XFREERDP.exists():
         die(f"Patched xfreerdp not found: {XFREERDP}")
     if not RDPW.exists():

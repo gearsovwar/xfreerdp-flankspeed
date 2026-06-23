@@ -1,7 +1,4 @@
-cd "$HOME/xfreerdp-flankspeed"
 
-cat > README.md <<'EOF'
-# xfreerdp-flankspeed
 
 `xfreerdp-flankspeed` is a Linux launcher for connecting to Azure Virtual Desktop / Flank Speed-style remote desktops with CAC smartcard redirection using a patched FreeRDP build.
 

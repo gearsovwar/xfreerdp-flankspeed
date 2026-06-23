@@ -148,8 +148,6 @@ Example:
     BROWSER_PROFILE="$HOME/.cache/avd-token-browser"
     USER_UPN="first.last.civ@example.mil"
 
-Do not commit your real config file.
-
 ## Usage
 
 Install the launcher:

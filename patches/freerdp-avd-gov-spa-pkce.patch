@@ -1,60 +1,159 @@
 diff --git a/client/common/client.c b/client/common/client.c
-index 1f87a5bfa..a2c1b6111 100644
+index 1f87a5bfa..9ff18c15b 100644
 --- a/client/common/client.c
 +++ b/client/common/client.c
-@@ -2487,6 +2487,11 @@ BOOL freerdp_client_use_relative_mouse_events(rdpClientContext* cctx)
+@@ -2487,6 +2487,92 @@ BOOL freerdp_client_use_relative_mouse_events(rdpClientContext* cctx)
  }
  
  #if defined(WITH_AAD)
 +
 +/* Local PKCE patch for AVD Gov webclient redirect. */
-+static const char* freerdp_local_pkce_verifier = "0dMqDIdXx45a9BrrH5fRFmidWzNX-cBOxX7gLWSB3K4NXtWRQwsiChXLVVhMVKv9";
-+static const char* freerdp_local_pkce_challenge = "0MAuwhyAZW0NIO3n2cjrIMvi_45ZpweePPK-6hTGZb8";
++#include <openssl/evp.h>
++#include <openssl/rand.h>
++#include <openssl/sha.h>
++
++static char freerdp_local_pkce_verifier[128] = { 0 };
++static char freerdp_local_pkce_challenge[128] = { 0 };
++static BOOL freerdp_local_pkce_ready = FALSE;
++
++static BOOL freerdp_local_base64url(const BYTE* input, size_t input_len, char* output,
++                                    size_t output_len)
++{
++        if (!input || !output || (output_len == 0))
++                return FALSE;
++
++        const size_t b64_len = 4 * ((input_len + 2) / 3);
++        if (b64_len + 1 > INT_MAX)
++                return FALSE;
++
++        unsigned char* tmp = (unsigned char*)calloc(1, b64_len + 1);
++        if (!tmp)
++                return FALSE;
++
++        const int encoded_len = EVP_EncodeBlock(tmp, input, (int)input_len);
++        if (encoded_len < 0)
++        {
++                free(tmp);
++                return FALSE;
++        }
++
++        size_t j = 0;
++        for (int i = 0; i < encoded_len; i++)
++        {
++                char c = (char)tmp[i];
++
++                if (c == '=')
++                        break;
++
++                if (j + 1 >= output_len)
++                {
++                        free(tmp);
++                        return FALSE;
++                }
++
++                if (c == '+')
++                        c = '-';
++                else if (c == '/')
++                        c = '_';
++
++                output[j++] = c;
++        }
++
++        output[j] = '\0';
++        free(tmp);
++        return TRUE;
++}
++
++static BOOL freerdp_local_pkce_init(void)
++{
++        BYTE random_bytes[48] = { 0 };
++        BYTE digest[SHA256_DIGEST_LENGTH] = { 0 };
++
++        if (freerdp_local_pkce_ready)
++                return TRUE;
++
++        if (RAND_bytes(random_bytes, sizeof(random_bytes)) != 1)
++                return FALSE;
++
++        if (!freerdp_local_base64url(random_bytes, sizeof(random_bytes),
++                                     freerdp_local_pkce_verifier,
++                                     sizeof(freerdp_local_pkce_verifier)))
++                return FALSE;
++
++        SHA256((const BYTE*)freerdp_local_pkce_verifier,
++               strlen(freerdp_local_pkce_verifier), digest);
++
++        if (!freerdp_local_base64url(digest, sizeof(digest), freerdp_local_pkce_challenge,
++                                     sizeof(freerdp_local_pkce_challenge)))
++                return FALSE;
++
++        freerdp_local_pkce_ready = TRUE;
++        return TRUE;
++}
++
 +
  WINPR_ATTR_MALLOC(free, 1)
  static char* get_redirect_uri(const rdpSettings* settings)
  {
-@@ -2539,8 +2544,9 @@ static char* avd_auth_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
+@@ -2539,8 +2625,12 @@ static char* avd_auth_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
  
  	char* url = nullptr;
  	size_t urllen = 0;
 -	winpr_asprintf(&url, &urllen, "%s?client_id=%s&response_type=code&scope=%s&redirect_uri=%s", ep,
 -	               client_id, scope, redirect_uri);
-+	winpr_asprintf(&url, &urllen,
++	if (!freerdp_local_pkce_init())
++                        return NULL;
++
++                winpr_asprintf(&url, &urllen,
 +                       "%s?client_id=%s&response_type=code&scope=%s&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256",
 +                       ep, client_id, scope, redirect_uri, freerdp_local_pkce_challenge);
  	free(redirect_uri);
  	return url;
  }
-@@ -2565,8 +2571,8 @@ static char* avd_token_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
+@@ -2564,9 +2654,12 @@ static char* avd_token_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
+ 	size_t urllen = 0;
  
  	const char* code = va_arg(ap, const char*);
- 	winpr_asprintf(&url, &urllen,
+-	winpr_asprintf(&url, &urllen,
 -	               "grant_type=authorization_code&code=%s&client_id=%s&scope=%s&redirect_uri=%s",
 -	               code, client_id, scope, redirect_uri);
++	if (!freerdp_local_pkce_init())
++                        return NULL;
++
++                winpr_asprintf(&url, &urllen,
 +                       "grant_type=authorization_code&code=%s&client_id=%s&scope=%s&redirect_uri=%s&code_verifier=%s",
 +                       code, client_id, scope, redirect_uri, freerdp_local_pkce_verifier);
  	free(redirect_uri);
  	return url;
  }
-@@ -2591,8 +2597,8 @@ static char* aad_auth_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
+@@ -2590,9 +2683,12 @@ static char* aad_auth_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
+ 		{
  			const char* ep = freerdp_utils_aad_get_wellknown_string(
  			    &cctx->context, AAD_WELLKNOWN_authorization_endpoint);
- 			winpr_asprintf(&url, &urllen,
+-			winpr_asprintf(&url, &urllen,
 -			               "%s?client_id=%s&response_type=code&scope=%s&redirect_uri=%s", ep,
 -			               client_id, scope, redirect_uri);
++			if (!freerdp_local_pkce_init())
++                        return NULL;
++
++                winpr_asprintf(&url, &urllen,
 +                       "%s?client_id=%s&response_type=code&scope=%s&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256",
 +                       ep, client_id, scope, redirect_uri, freerdp_local_pkce_challenge);
  		}
  	}
  
-@@ -2622,9 +2628,9 @@ static char* aad_token_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
+@@ -2621,10 +2717,13 @@ static char* aad_token_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
+ 	char* url = nullptr;
  	size_t urllen = 0;
  
- 	winpr_asprintf(
+-	winpr_asprintf(
 -	    &url, &urllen,
 -	    "grant_type=authorization_code&code=%s&client_id=%s&scope=%s&redirect_uri=%s&req_cnf=%s",
 -	    code, client_id, scope, redirect_uri, req_cnf);
++	if (!freerdp_local_pkce_init())
++                return NULL;
++
++        winpr_asprintf(
 +            &url, &urllen,
 +            "grant_type=authorization_code&code=%s&client_id=%s&scope=%s&redirect_uri=%s&req_cnf=%s&code_verifier=%s",
 +            code, client_id, scope, redirect_uri, req_cnf, freerdp_local_pkce_verifier);

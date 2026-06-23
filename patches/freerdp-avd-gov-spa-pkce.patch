@@ -1,0 +1,141 @@
+diff --git a/client/common/client.c b/client/common/client.c
+index 1f87a5bfa..a2c1b6111 100644
+--- a/client/common/client.c
++++ b/client/common/client.c
+@@ -2487,6 +2487,11 @@ BOOL freerdp_client_use_relative_mouse_events(rdpClientContext* cctx)
+ }
+ 
+ #if defined(WITH_AAD)
++
++/* Local PKCE patch for AVD Gov webclient redirect. */
++static const char* freerdp_local_pkce_verifier = "0dMqDIdXx45a9BrrH5fRFmidWzNX-cBOxX7gLWSB3K4NXtWRQwsiChXLVVhMVKv9";
++static const char* freerdp_local_pkce_challenge = "0MAuwhyAZW0NIO3n2cjrIMvi_45ZpweePPK-6hTGZb8";
++
+ WINPR_ATTR_MALLOC(free, 1)
+ static char* get_redirect_uri(const rdpSettings* settings)
+ {
+@@ -2539,8 +2544,9 @@ static char* avd_auth_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
+ 
+ 	char* url = nullptr;
+ 	size_t urllen = 0;
+-	winpr_asprintf(&url, &urllen, "%s?client_id=%s&response_type=code&scope=%s&redirect_uri=%s", ep,
+-	               client_id, scope, redirect_uri);
++	winpr_asprintf(&url, &urllen,
++                       "%s?client_id=%s&response_type=code&scope=%s&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256",
++                       ep, client_id, scope, redirect_uri, freerdp_local_pkce_challenge);
+ 	free(redirect_uri);
+ 	return url;
+ }
+@@ -2565,8 +2571,8 @@ static char* avd_token_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
+ 
+ 	const char* code = va_arg(ap, const char*);
+ 	winpr_asprintf(&url, &urllen,
+-	               "grant_type=authorization_code&code=%s&client_id=%s&scope=%s&redirect_uri=%s",
+-	               code, client_id, scope, redirect_uri);
++                       "grant_type=authorization_code&code=%s&client_id=%s&scope=%s&redirect_uri=%s&code_verifier=%s",
++                       code, client_id, scope, redirect_uri, freerdp_local_pkce_verifier);
+ 	free(redirect_uri);
+ 	return url;
+ }
+@@ -2591,8 +2597,8 @@ static char* aad_auth_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
+ 			const char* ep = freerdp_utils_aad_get_wellknown_string(
+ 			    &cctx->context, AAD_WELLKNOWN_authorization_endpoint);
+ 			winpr_asprintf(&url, &urllen,
+-			               "%s?client_id=%s&response_type=code&scope=%s&redirect_uri=%s", ep,
+-			               client_id, scope, redirect_uri);
++                       "%s?client_id=%s&response_type=code&scope=%s&redirect_uri=%s&code_challenge=%s&code_challenge_method=S256",
++                       ep, client_id, scope, redirect_uri, freerdp_local_pkce_challenge);
+ 		}
+ 	}
+ 
+@@ -2622,9 +2628,9 @@ static char* aad_token_request(rdpClientContext* cctx, WINPR_ATTR_UNUSED va_list
+ 	size_t urllen = 0;
+ 
+ 	winpr_asprintf(
+-	    &url, &urllen,
+-	    "grant_type=authorization_code&code=%s&client_id=%s&scope=%s&redirect_uri=%s&req_cnf=%s",
+-	    code, client_id, scope, redirect_uri, req_cnf);
++            &url, &urllen,
++            "grant_type=authorization_code&code=%s&client_id=%s&scope=%s&redirect_uri=%s&req_cnf=%s&code_verifier=%s",
++            code, client_id, scope, redirect_uri, req_cnf, freerdp_local_pkce_verifier);
+ 	free(redirect_uri);
+ 	return url;
+ }
+diff --git a/client/common/sso_mib_tokens.c b/client/common/sso_mib_tokens.c
+index 6858d1744..357f11e63 100644
+--- a/client/common/sso_mib_tokens.c
++++ b/client/common/sso_mib_tokens.c
+@@ -45,7 +45,7 @@ static BOOL sso_mib_get_avd_access_token(rdpClientContext* client_context, char*
+ 		goto cleanup;
+ 	}
+ 
+-	scopes = g_slist_append(scopes, g_strdup("https://www.wvd.microsoft.com/.default"));
++	scopes = g_slist_append(scopes, g_strdup("https://www.wvd.azure.us/.default"));
+ 
+ 	MIBPrt* prt = mib_client_app_acquire_token_silent(client_context->mibClientWrapper->app,
+ 	                                                  account, scopes, nullptr, nullptr, nullptr);
+diff --git a/libfreerdp/core/settings.c b/libfreerdp/core/settings.c
+index 9605c3940..72505d4ad 100644
+--- a/libfreerdp/core/settings.c
++++ b/libfreerdp/core/settings.c
+@@ -863,7 +863,7 @@ rdpSettings* freerdp_settings_new(DWORD flags)
+ 		                                 "https%%3A%%2F%%2F%s%%2F%s%%2Foauth2%%2Fnativeclient"))
+ 			goto out_fail;
+ 		if (!freerdp_settings_set_string(settings, FreeRDP_GatewayAvdScope,
+-		                                 "https%3A%2F%2Fwww.wvd.microsoft.com%2F.default%20openid%"
++		                                 "https%3A%2F%2Fwww.wvd.azure.us%2F.default%20openid%"
+ 		                                 "20profile%20offline_access"))
+ 
+ 			goto out_fail;
+@@ -871,7 +871,7 @@ rdpSettings* freerdp_settings_new(DWORD flags)
+ 		                                 "a85cf173-4192-42f8-81fa-777a763e6e2c"))
+ 			goto out_fail;
+ 		if (!freerdp_settings_set_string(settings, FreeRDP_GatewayAzureActiveDirectory,
+-		                                 "login.microsoftonline.com"))
++		                                 "login.microsoftonline.us"))
+ 			goto out_fail;
+ 		if (!freerdp_settings_set_string(settings, FreeRDP_GatewayAvdAadtenantid, "common"))
+ 			goto out_fail;
+diff --git a/libfreerdp/utils/http.c b/libfreerdp/utils/http.c
+index 17886d6d7..492d90100 100644
+--- a/libfreerdp/utils/http.c
++++ b/libfreerdp/utils/http.c
+@@ -134,6 +134,38 @@ BOOL freerdp_http_request(const char* url, const char* body, long* status_code,
+ 				free(hostname);
+ 				return FALSE;
+ 			}
++
++                        /*
++                         * Local AVD Gov SPA redirect patch:
++                         * Azure rejects redeeming a SPA redirect code unless the token request
++                         * looks like a browser cross-origin request.
++                         */
++                        if (strstr(url, "login.microsoftonline.us") &&
++                            strstr(body, "grant_type=authorization_code"))
++                        {
++                                const size_t hlen = strlen(headers);
++                                if (hlen >= 2)
++                                {
++                                        char* patched_headers = NULL;
++                                        size_t patched_size = 0;
++
++                                        if (winpr_asprintf(
++                                                &patched_headers, &patched_size,
++                                                "%.*s"
++                                                "Origin: https://rdweb.wvd.azure.us\r\n"
++                                                "Referer: https://rdweb.wvd.azure.us/arm/webclient/aadj.html\r\n"
++                                                "\r\n",
++                                                (int)(hlen - 2), headers) < 0)
++                                        {
++                                                free(hostname);
++                                                return FALSE;
++                                        }
++
++                                        free(headers);
++                                        headers = patched_headers;
++                                        size = patched_size;
++                                }
++                        }
+ 		}
+ 		else
+ 		{

@@ -1,0 +1,26 @@
+# Secrets / auth artifacts
+.env
+*.token
+*token*
+*bearer*
+*authorization*
+*session_state*
+*code=*
+avd-token-candidates/
+.cache/
+browser-profile/
+*.har
+
+# User-specific files
+*.rdpw
+*.rdp
+
+# Build junk
+build/
+__pycache__/
+*.pyc
+
+# Editor junk
+.vscode/
+.idea/
+.DS_Store

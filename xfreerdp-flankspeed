@@ -1,0 +1,309 @@
+#!/usr/bin/env python3
+import asyncio
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+import pty
+import select
+import atexit
+from pathlib import Path
+
+try:
+    from playwright.async_api import async_playwright
+except ImportError:
+    print("Missing Playwright. Install it with:")
+    print("  python3 -m pip install --user playwright")
+    print("  python3 -m playwright install chromium")
+    sys.exit(1)
+
+XFREERDP = Path.home() / "freerdp-webview/build/client/X11/xfreerdp"
+RDPW = Path.home() / "Desktop/East NVDesktop-10.rdpw"
+BROWSER_PROFILE = Path.home() / ".cache/avd-token-browser"
+
+USER = "johnathon.s.mccollum.civ@us.navy.mil"
+
+WEBCLIENT_URL = "https://client.wvd.azure.us/arm/webclient/index.html"
+FEEDDISCOVERY_MATCH = "https://client.wvd.azure.us/api/arm/feeddiscovery"
+
+AADJ_REDIRECT_PREFIX = "https://rdweb.wvd.azure.us/arm/webclient/aadj.html"
+AVD_ACCESS_REDIRECT_ARG = "https%%3A%%2F%%2Frdweb.wvd.azure.us%%2Farm%%2Fwebclient%%2Faadj.html"
+
+TOKEN_TIMEOUT_SECONDS = 240
+AAD_CODE_TIMEOUT_SECONDS = 240
+
+
+def die(msg, code=1):
+    print(f"\nERROR: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def check_paths():
+    if not XFREERDP.exists():
+        die(f"Patched xfreerdp not found: {XFREERDP}")
+    if not RDPW.exists():
+        die(f".rdpw file not found: {RDPW}")
+
+
+def looks_like_auth_url(text):
+    m = re.search(r"https://login\.microsoftonline\.us/[^\s\"']+", text)
+    if not m:
+        return None
+    return m.group(0).strip().rstrip(").,;")
+
+
+async def wait_for_gateway_token(context):
+    token_box = {"token": None}
+
+    async def on_request(req):
+        try:
+            if FEEDDISCOVERY_MATCH in req.url:
+                auth = req.headers.get("authorization") or req.headers.get("Authorization")
+                if auth and auth.lower().startswith("bearer "):
+                    token_box["token"] = auth[7:].strip()
+        except Exception:
+            pass
+
+    context.on("request", on_request)
+
+    page = await context.new_page()
+    print("[1/4] Opening Flank Speed / AVD web client for CAC login...")
+    print("      Use the browser window to sign in if prompted.")
+    try:
+        await page.goto(WEBCLIENT_URL, wait_until="domcontentloaded", timeout=90000)
+    except Exception as e:
+        print(f"      Browser navigation did not fully finish yet: {e.__class__.__name__}")
+        print("      Continuing anyway; sign in in the browser if needed.")
+
+    start = time.time()
+    while time.time() - start < TOKEN_TIMEOUT_SECONDS:
+        if token_box["token"]:
+            print("[2/4] Captured AVD gateway token.")
+            try:
+                await page.close()
+            except Exception:
+                pass
+            return token_box["token"]
+
+        try:
+            elapsed = int(time.time() - start)
+            if elapsed in (30, 75, 130):
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=45000)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        await asyncio.sleep(0.5)
+
+    die("Timed out waiting for AVD gateway token.")
+
+
+async def wait_for_aadj_code(context, auth_url):
+    result = {"url": None}
+
+    def inspect_url(url):
+        if url.startswith(AADJ_REDIRECT_PREFIX) and ("code=" in url or "error=" in url):
+            result["url"] = url
+
+    async def setup_page(page):
+        page.on("framenavigated", lambda frame: inspect_url(frame.url))
+        page.on("load", lambda: inspect_url(page.url))
+
+    context.on("page", lambda page: asyncio.create_task(setup_page(page)))
+
+    page = await context.new_page()
+    await setup_page(page)
+
+    print("[3/4] Opening FreeRDP AAD login URL...")
+    try:
+        await page.goto(auth_url, wait_until="domcontentloaded", timeout=90000)
+    except Exception as e:
+        print(f"      AAD navigation did not fully finish yet: {e.__class__.__name__}")
+        print("      Continuing anyway; waiting for final redirect.")
+
+    start = time.time()
+    while time.time() - start < AAD_CODE_TIMEOUT_SECONDS:
+        for p in context.pages:
+            try:
+                inspect_url(p.url)
+            except Exception:
+                pass
+
+        if result["url"]:
+            if "error=" in result["url"]:
+                print("\nAAD returned an error redirect:")
+                print(result["url"].split("?", 1)[-1])
+                die("AAD authentication failed.")
+            print("[4/4] Captured final AAD code redirect. Feeding it to FreeRDP...")
+            return result["url"]
+
+        await asyncio.sleep(0.25)
+
+    die("Timed out waiting for final aadj.html?code= redirect.")
+
+
+async def run_freerdp_pty(cmd, context):
+    master_fd, slave_fd = pty.openpty()
+    proc = None
+
+    def cleanup_child():
+        nonlocal proc
+        if proc and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                time.sleep(0.75)
+            except Exception:
+                pass
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+
+    atexit.register(cleanup_child)
+
+    proc = subprocess.Popen(
+        cmd,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+        env=os.environ.copy(),
+        preexec_fn=os.setsid,
+    )
+    os.close(slave_fd)
+
+    buffer = ""
+    auth_url_sent = False
+    browser_closed = False
+
+    try:
+        while True:
+            if proc.poll() is not None:
+                while True:
+                    r, _, _ = select.select([master_fd], [], [], 0)
+                    if not r:
+                        break
+                    try:
+                        data = os.read(master_fd, 4096)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    sys.stdout.write(data.decode(errors="replace"))
+                    sys.stdout.flush()
+                return proc.returncode
+
+            r, _, _ = select.select([master_fd], [], [], 0.1)
+            if not r:
+                await asyncio.sleep(0.05)
+                continue
+
+            try:
+                data = os.read(master_fd, 4096)
+            except OSError:
+                return proc.wait()
+
+            if not data:
+                return proc.wait()
+
+            text = data.decode(errors="replace")
+            sys.stdout.write(text)
+            sys.stdout.flush()
+
+            buffer += text
+            if len(buffer) > 20000:
+                buffer = buffer[-12000:]
+
+            if not auth_url_sent:
+                auth_url = looks_like_auth_url(buffer)
+                if auth_url:
+                    auth_url_sent = True
+                    final_url = await wait_for_aadj_code(context, auth_url)
+
+                    print("Closing browser to release CAC before smartcard redirection...")
+                    try:
+                        await context.close()
+                        browser_closed = True
+                    except Exception:
+                        pass
+
+                    # Hard cleanup in case Chromium helper processes survive.
+                    subprocess.run(["pkill", "-f", "avd-token-browser"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    subprocess.run(["pkill", "-f", "playwright"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                    await asyncio.sleep(2.0)
+                    os.write(master_fd, (final_url + "\n").encode())
+
+    except KeyboardInterrupt:
+        print("\nCtrl+C received. Closing browser and killing FreeRDP...")
+        if not browser_closed:
+            try:
+                await context.close()
+            except Exception:
+                pass
+        cleanup_child()
+        return 130
+    finally:
+        cleanup_child()
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+
+
+async def main():
+    check_paths()
+
+    async with async_playwright() as p:
+        context = await p.chromium.launch_persistent_context(
+            str(BROWSER_PROFILE),
+            headless=False,
+            args=["--start-maximized"],
+        )
+
+        try:
+            gateway_token = await wait_for_gateway_token(context)
+
+            cmd = [
+                str(XFREERDP),
+                str(RDPW),
+                f"/gateway:type:arm,bearer:{gateway_token}",
+                f"/azure:avd-access:{AVD_ACCESS_REDIRECT_ARG}",
+                "/sec:aad",
+                f"/u:{USER}",
+                "/d:AzureAD",
+                "/smartcard",
+                "/cert:ignore",
+                "/log-level:INFO",
+            ]
+
+            print("\nLaunching patched FreeRDP...")
+            rc = await run_freerdp_pty(cmd, context)
+            sys.exit(rc)
+        finally:
+            try:
+                await context.close()
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nExited.")
+        try:
+            subprocess.run(["pkill", "-f", str(XFREERDP)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", "avd-token-browser"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-f", "playwright"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        sys.exit(130)
+    except asyncio.CancelledError:
+        print("\nExited.")
+        sys.exit(130)

@@ -208,27 +208,10 @@ If login gets stuck, close leftover browser processes and retry:
     pkill -f "playwright"
     xfreerdp-flankspeed
 
-## Security notes
-
-Never commit:
-
-- `.rdpw` files
-- bearer tokens
-- refresh tokens
-- ID tokens
-- browser profiles
-- HAR files
-- final redirected `code=` URLs
-- `session_state` URLs
-- personal UPNs
-- tenant-specific private details
-
-After testing, clear temporary token artifacts:
+To clear local temporary tokens
 
     unset GW_TOKEN AAD_TOKEN TOKEN
     rm -rf "$HOME/avd-token-candidates"
-
-If a token or full redirect URL is accidentally posted publicly, sign out/revoke sessions before continuing.
 
 ## Disclaimer
 
